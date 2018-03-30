@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 from collections import namedtuple, defaultdict
 from .rt09_parser import RT09Parser
 from pydub import AudioSegment
@@ -21,8 +22,14 @@ class RT09Converter:
         parser = RT09Parser(self.config)
         rt09_elements = parser.parse()
 
+        print("run dataset-converter on dataset: %s with min. segment-size of %dms and a duration per speaker of ca. %dms"
+              % (self.config["data"]["dataset_to_use"], self.segment_size, self.max_duration_per_speaker))
+
         rt09_element = rt09_elements[0]
         base_out_dir = os.path.join(self.out_dir, rt09_element["id"])
+
+        if os.path.isdir(base_out_dir):
+            shutil.rmtree(base_out_dir)
 
         for turn in RT09Converter._skip_overlap_generator(rt09_element["turns"]):
             speaker = Speaker(turn.speaker, turn.spkrType)
@@ -40,28 +47,27 @@ class RT09Converter:
             random.shuffle(value)
             i = 0
 
+            print("creating segments for speaker %s" % key.speaker_id)
+
             while i < len(value) and (segment_generated_per_speaker[key] * self.segment_size) < self.max_duration_per_speaker:
                 seg = value[i]
 
                 delta = seg.end - seg.start
                 new_size = current_segment_size + delta
+                current_segment = current_segment + RT09Converter._cut_audio_segment(seg)
+                current_segment_size = new_size
 
-                if new_size < self.segment_size:
-                    current_segment = current_segment + RT09Converter._cut_audio_segment(seg)
-                    current_segment_size = new_size
-                    i += 1
-                else:
-                    if new_size > self.segment_size:
-                        current_segment = current_segment + AudioSegment.silent(self.segment_size - current_segment_size)
-                    else:
-                        i += 1
-
+                if new_size > self.segment_size:
                     RT09Converter._save_segment(base_out_dir, key.speaker_id, segment_generated_per_speaker[key],
                                                 current_segment)
 
                     segment_generated_per_speaker[key] += 1
                     current_segment = AudioSegment.empty()
                     current_segment_size = 0.0
+
+                i += 1
+
+            print("created %d segments for speaker %s" % (segment_generated_per_speaker[key], key.speaker_id))
 
     @staticmethod
     def _save_segment(base_dir, speaker_id, idx, audio_segment):
