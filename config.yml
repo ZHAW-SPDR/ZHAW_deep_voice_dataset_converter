@@ -1,0 +1,7 @@
+data:
+  base_dir: ./rt09/data
+  dataset_to_use: NIST_20080307-0955
+converter:
+  segment_size: 5000
+  max_duration_per_speaker: 600000
+  out_dir: ./rt09/out
