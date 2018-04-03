@@ -12,10 +12,10 @@ GenerationInfo = namedtuple("GenerationInfo", ["count", "duration"])
 
 class RT09Converter:
     def __init__(self, evaluation_dataset, config):
-        self.evaluation_dataset = evaluation_dataset
         self.config = config
-        self.min_segment_size = config["converter"]["min_segment_size"]
+        self.evaluation_dataset = evaluation_dataset
         self.out_dir = config["converter"]["out_dir"]
+        self.min_segment_size = config["converter"]["min_segment_size"]
         self.max_duration_per_speaker = config["converter"]["max_duration_per_speaker"]
         self.skip_overlapping_segment = config["converter"]["skip_overlapping_segment"]
 
@@ -56,6 +56,9 @@ class RT09Converter:
         self._generate_speaker_segments(speaker_segments, base_out_dir)
         print("done")
 
+        RT09Converter._create_speaker_list_file(base_out_dir, speaker_segments)
+        print("created speaker file")
+
     def _generate_speaker_segments(self, speaker_segments, base_dir):
         current_segment_size = 0.0
         current_segment = AudioSegment.empty()
@@ -80,8 +83,10 @@ class RT09Converter:
                 current_segment_size = new_size
 
                 if new_size > self.min_segment_size:
-                    RT09Converter._save_segment(os.path.join(base_dir, key.organisation), key.speaker_id,
-                                                segment_generated_per_speaker[key].count, current_segment)
+                    RT09Converter._save_segment(
+                        os.path.join(base_dir, key.organisation),
+                        "%s_%s" % (key.organisation, key.speaker_id),
+                        segment_generated_per_speaker[key].count, current_segment)
 
                     segment_generated_per_speaker[key] = GenerationInfo(
                         count=segment_generated_per_speaker[key].count + 1,
@@ -104,6 +109,13 @@ class RT09Converter:
         N = sum(gender_distribution.values())
         print("\tgender-distribution: %1.2f male %1.2f female" % (gender_distribution["male"] / N,
                                                                   gender_distribution["female"] / N))
+
+    @staticmethod
+    def _create_speaker_list_file(base_dir, speaker_segments):
+        with open(os.path.join(base_dir, "speakers_rt09.txt"), mode="w") as speaker_file:
+                speaker_file.writelines(
+                    map(lambda key: "%s_%s\n" % (key.organisation, key.speaker_id), sorted(speaker_segments.keys()))
+                )
 
     @staticmethod
     def _get_organisation_name(dataset_folder):
