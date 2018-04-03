@@ -1,7 +1,8 @@
 data:
+  task: sdm
   base_dir: ./rt09/data
-  dataset_to_use: NIST_20080307-0955
 converter:
-  segment_size: 10000
-  max_duration_per_speaker: 600000
+  min_segment_size: 8000
+  max_duration_per_speaker: 150000
   out_dir: ./rt09/out
+  skip_overlapping_segment: FALSE

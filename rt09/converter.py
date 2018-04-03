@@ -5,51 +5,73 @@ from collections import namedtuple, defaultdict
 from .rt09_parser import RT09Parser
 from pydub import AudioSegment
 
-
 SpeakerSegment = namedtuple("SpeakerSegment", ["filename", "start", "end"])
-Speaker = namedtuple("Speaker", ["speaker_id", "gender"])
+Speaker = namedtuple("Speaker", ["organisation", "speaker_id", "gender"])
+GenerationInfo = namedtuple("GenerationInfo", ["count", "duration"])
 
 
 class RT09Converter:
-    def __init__(self, config):
+    def __init__(self, evaluation_dataset, config):
+        self.evaluation_dataset = evaluation_dataset
         self.config = config
-        self.segment_size = config["converter"]["segment_size"]
+        self.min_segment_size = config["converter"]["min_segment_size"]
         self.out_dir = config["converter"]["out_dir"]
         self.max_duration_per_speaker = config["converter"]["max_duration_per_speaker"]
-        self.speaker_segments = defaultdict(list)
+        self.skip_overlapping_segment = config["converter"]["skip_overlapping_segment"]
 
     def convert(self):
-        parser = RT09Parser(self.config)
+        parser = RT09Parser(self.evaluation_dataset, self.config)
         rt09_elements = parser.parse()
 
-        print("run dataset-converter on dataset: %s with min. segment-size of %dms and a duration per speaker of ca. %dms"
-              % (self.config["data"]["dataset_to_use"], self.segment_size, self.max_duration_per_speaker))
+        print(
+            "creating a training-set for the dataset: %s with min. segment-size of %dms and a duration per speaker of ca. %dms"
+            % (self.evaluation_dataset, self.min_segment_size, self.max_duration_per_speaker))
 
-        rt09_element = rt09_elements[0]
-        base_out_dir = os.path.join(self.out_dir, rt09_element["id"])
+        base_out_dir = os.path.join(self.out_dir, self.evaluation_dataset)
 
         if os.path.isdir(base_out_dir):
             shutil.rmtree(base_out_dir)
 
-        for turn in RT09Converter._skip_overlap_generator(rt09_element["turns"]):
-            speaker = Speaker(turn.speaker, turn.spkrType)
+        os.mkdir(base_out_dir)
+        speaker_segments = defaultdict(list)
 
-            for file in rt09_element["files"]:
-                speaker_segment = SpeakerSegment(file.replace("sph", "wav"), int(float(turn.startTime) * 1000),
-                                                 int(float(turn.endTime) * 1000))
-                self.speaker_segments[speaker].append(speaker_segment)
+        print("prepare segmentation per speaker")
 
+        for rt09_element in rt09_elements:
+            organisation_name = RT09Converter._get_organisation_name(rt09_element["id"])
+            dataset_dir = os.path.join(base_out_dir, organisation_name)
+
+            if not os.path.isdir(dataset_dir):
+                os.mkdir(dataset_dir)
+
+            for turn in self._turn_iterator(rt09_element["turns"]):
+                speaker = Speaker(organisation_name, turn.speaker, turn.spkrType)
+
+                for file in rt09_element["files"]:
+                    speaker_segment = SpeakerSegment(file.replace("sph", "wav"), int(float(turn.startTime) * 1000),
+                                                     int(float(turn.endTime) * 1000))
+                    speaker_segments[speaker].append(speaker_segment)
+
+        print("start with segmentation...")
+        self._generate_speaker_segments(speaker_segments, base_out_dir)
+        print("done")
+
+    def _generate_speaker_segments(self, speaker_segments, base_dir):
         current_segment_size = 0.0
         current_segment = AudioSegment.empty()
-        segment_generated_per_speaker = defaultdict(int)
+        segment_generated_per_speaker = defaultdict(lambda: GenerationInfo(0, 0.0))
+        overall_duration = 0.0
 
-        for key, value in self.speaker_segments.items():
+        gender_distribution = {
+            "male": 0,
+            "female": 0
+        }
+
+        for key, value in speaker_segments.items():
             random.shuffle(value)
             i = 0
 
-            print("creating segments for speaker %s" % key.speaker_id)
-
-            while i < len(value) and (segment_generated_per_speaker[key] * self.segment_size) < self.max_duration_per_speaker:
+            while i < len(value) and segment_generated_per_speaker[key].duration < self.max_duration_per_speaker:
                 seg = value[i]
 
                 delta = seg.end - seg.start
@@ -57,17 +79,43 @@ class RT09Converter:
                 current_segment = current_segment + RT09Converter._cut_audio_segment(seg)
                 current_segment_size = new_size
 
-                if new_size > self.segment_size:
-                    RT09Converter._save_segment(base_out_dir, key.speaker_id, segment_generated_per_speaker[key],
-                                                current_segment)
+                if new_size > self.min_segment_size:
+                    RT09Converter._save_segment(os.path.join(base_dir, key.organisation), key.speaker_id,
+                                                segment_generated_per_speaker[key].count, current_segment)
 
-                    segment_generated_per_speaker[key] += 1
+                    segment_generated_per_speaker[key] = GenerationInfo(
+                        count=segment_generated_per_speaker[key].count + 1,
+                        duration=segment_generated_per_speaker[key].duration + new_size)
+
+                    gender_distribution[key.gender] += 1
+
                     current_segment = AudioSegment.empty()
                     current_segment_size = 0.0
 
                 i += 1
 
-            print("created %d segments for speaker %s" % (segment_generated_per_speaker[key], key.speaker_id))
+            overall_duration += segment_generated_per_speaker[key].duration
+
+            print("\tcreated %d segments for speaker (%s,%s) with a duration of %dms" %
+                  (segment_generated_per_speaker[key].count, key.organisation, key.speaker_id,
+                   segment_generated_per_speaker[key].duration))
+
+        print("\toverall duration is %dms" % overall_duration)
+        N = sum(gender_distribution.values())
+        print("\tgender-distribution: %1.2f male %1.2f female" % (gender_distribution["male"] / N,
+                                                                  gender_distribution["female"] / N))
+
+    @staticmethod
+    def _get_organisation_name(dataset_folder):
+        return dataset_folder.split("_")[0]
+
+    def _turn_iterator(self, turns):
+        if self.skip_overlapping_segment:
+            for turn in RT09Converter._skip_overlap_generator(turns):
+                yield turn
+        else:
+            for turn in turns:
+                yield turn
 
     @staticmethod
     def _save_segment(base_dir, speaker_id, idx, audio_segment):
@@ -100,6 +148,6 @@ class RT09Converter:
                     yield curr
                     i += 1
                 else:
-                    i += 2 #skip also next element
+                    i += 2  # skip also next element
             else:
                 i += 1
