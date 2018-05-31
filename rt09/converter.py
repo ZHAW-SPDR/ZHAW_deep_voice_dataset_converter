@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+import numpy as np
 from collections import namedtuple, defaultdict
 from .rt09_parser import RT09Parser
 from pydub import AudioSegment
@@ -16,8 +17,13 @@ class RT09Converter:
         self.evaluation_dataset = evaluation_dataset
         self.out_dir = config["converter"]["out_dir"]
         self.min_segment_size = config["converter"]["min_segment_size"]
+        self.use_normalized_audio = config["data"]["use_normalized_audio"]
         self.max_duration_per_speaker = config["converter"]["max_duration_per_speaker"]
         self.skip_overlapping_segment = config["converter"]["skip_overlapping_segment"]
+
+        self.tolerance = 0.1
+        self.tolerance_segment_size = (1.0 + self.tolerance) * self.min_segment_size
+        self.max_duration_per_speaker_tolerance = (1.0 - self.tolerance) * self.max_duration_per_speaker
 
     def convert(self):
         parser = RT09Parser(self.evaluation_dataset, self.config)
@@ -48,15 +54,15 @@ class RT09Converter:
                 speaker = Speaker(organisation_name, turn.speaker, turn.spkrType)
 
                 for file in rt09_element["files"]:
-                    speaker_segment = SpeakerSegment(file.replace("sph", "wav"), int(float(turn.startTime) * 1000),
+                    speaker_segment = SpeakerSegment(self._get_filename(file), int(float(turn.startTime) * 1000),
                                                      int(float(turn.endTime) * 1000))
                     speaker_segments[speaker].append(speaker_segment)
 
         print("start with segmentation...")
-        self._generate_speaker_segments(speaker_segments, base_out_dir)
+        speaker_to_exclude = self._generate_speaker_segments(speaker_segments, base_out_dir)
         print("done")
 
-        RT09Converter._create_speaker_list_file(base_out_dir, speaker_segments)
+        RT09Converter._create_speaker_list_file(base_out_dir, speaker_segments, speaker_to_exclude)
         print("created speaker file")
 
     def _generate_speaker_segments(self, speaker_segments, base_dir):
@@ -64,6 +70,7 @@ class RT09Converter:
         current_segment = AudioSegment.empty()
         segment_generated_per_speaker = defaultdict(lambda: GenerationInfo(0, 0.0))
         overall_duration = 0.0
+        segment_sizes = []
 
         gender_distribution = {
             "male": 0,
@@ -79,23 +86,26 @@ class RT09Converter:
 
                 delta = seg.end - seg.start
                 new_size = current_segment_size + delta
-                current_segment = current_segment + RT09Converter._cut_audio_segment(seg)
-                current_segment_size = new_size
 
-                if new_size > self.min_segment_size:
-                    RT09Converter._save_segment(
-                        os.path.join(base_dir, key.organisation),
-                        "%s_%s" % (key.organisation, key.speaker_id),
-                        segment_generated_per_speaker[key].count, current_segment)
+                if new_size <= self.tolerance_segment_size:
+                    current_segment = current_segment + RT09Converter._cut_audio_segment(seg)
+                    current_segment_size = new_size
 
-                    segment_generated_per_speaker[key] = GenerationInfo(
-                        count=segment_generated_per_speaker[key].count + 1,
-                        duration=segment_generated_per_speaker[key].duration + new_size)
+                    if new_size > self.min_segment_size:
+                        RT09Converter._save_segment(
+                            os.path.join(base_dir, key.organisation),
+                            "%s_%s" % (key.organisation, key.speaker_id),
+                            segment_generated_per_speaker[key].count, current_segment)
 
-                    gender_distribution[key.gender] += 1
+                        segment_generated_per_speaker[key] = GenerationInfo(
+                            count=segment_generated_per_speaker[key].count + 1,
+                            duration=segment_generated_per_speaker[key].duration + new_size)
 
-                    current_segment = AudioSegment.empty()
-                    current_segment_size = 0.0
+                        gender_distribution[key.gender] += 1
+
+                        current_segment = AudioSegment.empty()
+                        current_segment_size = 0.0
+                        segment_sizes.append(new_size)
 
                 i += 1
 
@@ -105,17 +115,36 @@ class RT09Converter:
                   (segment_generated_per_speaker[key].count, key.organisation, key.speaker_id,
                    segment_generated_per_speaker[key].duration))
 
+        speakers_to_exclude = [k for k, v in segment_generated_per_speaker.items()
+                               if v.duration <= self.max_duration_per_speaker_tolerance]
+
+        print("\tspeakers to exclude [%s]" % ", ".join(map(lambda speaker: speaker.speaker_id, speakers_to_exclude)))
+
         print("\toverall duration is %dms" % overall_duration)
         N = sum(gender_distribution.values())
         print("\tgender-distribution: %1.2f male %1.2f female" % (gender_distribution["male"] / N,
                                                                   gender_distribution["female"] / N))
+        durations = np.array(segment_sizes)
+        print("\tsegment-sizes stats: mean: %.3f stddev: %.3f min: %f max: %f"
+              % (durations.mean(), durations.std(), durations.min(), durations.max()))
+
+        return speakers_to_exclude
+
+    def _get_filename(self, filename):
+        if self.use_normalized_audio:
+            return filename.replace(".sph", "_normalized.wav")
+
+        return filename.replace(".sph", ".wav")
 
     @staticmethod
-    def _create_speaker_list_file(base_dir, speaker_segments):
+    def _create_speaker_list_file(base_dir, speaker_segments, exclude):
+        filtered_speakers = [speaker for speaker in speaker_segments.keys()
+                             if speaker not in exclude]
+
         with open(os.path.join(base_dir, "speakers_rt09.txt"), mode="w") as speaker_file:
-                speaker_file.writelines(
-                    map(lambda key: "%s_%s\n" % (key.organisation, key.speaker_id), sorted(speaker_segments.keys()))
-                )
+            speaker_file.writelines(
+                map(lambda key: "%s_%s\n" % (key.organisation, key.speaker_id), sorted(filtered_speakers))
+            )
 
     @staticmethod
     def _get_organisation_name(dataset_folder):
@@ -127,7 +156,12 @@ class RT09Converter:
                 yield turn
         else:
             for turn in turns:
-                yield turn
+                delta = int((float(turn.endTime) - float(turn.startTime)) * 1000)
+
+                if delta <= self.tolerance_segment_size:
+                    yield turn
+                else:
+                    print("skipped turn with length %d" % delta)
 
     @staticmethod
     def _save_segment(base_dir, speaker_id, idx, audio_segment):
@@ -139,7 +173,7 @@ class RT09Converter:
         if not os.path.isdir(speaker_path):
             os.mkdir(speaker_path)
 
-        audio_segment.export(os.path.join(speaker_path, "%d.wav" % idx), format="wav")
+        audio_segment.export(os.path.join(speaker_path, "%d_RIFF.WAV" % idx), format="wav")
 
     @staticmethod
     def _cut_audio_segment(speaker_segment):

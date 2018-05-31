@@ -1,4 +1,5 @@
 import os
+import subprocess
 from .utf_groundtruth_parser import UtfGroundTruthParser
 
 
@@ -72,10 +73,11 @@ class RT09Parser:
                     continue
 
                 print('Converting File %s' % filehandle)
-                bashCommand = ['sph2pipe', '-p', '-f', self.converted_file_format, '-c', '1', filehandle,
-                               convertedFilehandle]
-                # bashCommand = ['sox', '-t', 'sph', filehandle, '-b', '16', '-t', 'wav', convertedFilehandle]
-                process = os.subprocess.Popen(bashCommand, stdout=os.subprocess.PIPE)
+
+                bash_command = ['sox', '-t', 'sph', filehandle, '-r', '16000', '-c', '1', '-t',
+                                self.converted_file_format, convertedFilehandle]
+
+                process = subprocess.Popen(bash_command, stdout=subprocess.PIPE)
                 output, error = process.communicate()
 
                 if error is not None:
